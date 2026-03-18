@@ -1,8 +1,11 @@
+import { useState } from "react";
 import type { Trip, Expense, Settlement } from "../types";
 import { CATEGORIES, CURRENCIES } from "../constants";
 import { getMemberColor, getInitial, formatJPY } from "../constants";
 import { exportCSV } from "../utils/csv";
 import { S } from "../styles";
+
+const APP_URL = "https://tabiwarikannapp.vercel.app";
 
 interface Props {
   trip: Trip;
@@ -23,11 +26,19 @@ export function Dashboard({
   onDeleteExpense,
   onOpenMember,
 }: Props) {
+  const [copied, setCopied] = useState(false);
   const foreignCurrency = CURRENCIES.find((c) => c.code === trip.foreignCurrency);
   const foreignSymbol = foreignCurrency?.symbol || "$";
 
   const toJPY = (amt: number, cur: string) =>
     cur === "JPY" ? amt : amt * (parseFloat(String(trip.exchangeRate)) || 0);
+
+  const handleCopyLink = () => {
+    const url = `${APP_URL}/?t=${trip.id}`;
+    navigator.clipboard.writeText(url).catch(() => {});
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   return (
     <div style={S.container}>
@@ -35,7 +46,25 @@ export function Dashboard({
         <button style={S.navBtn} onClick={onBack}>← 一覧</button>
         <div style={S.topTitle}>{trip.name}</div>
         <button style={S.exportBtn} onClick={() => exportCSV(trip)}>
-          エクスポート
+          CSV
+        </button>
+      </div>
+
+      {/* 招待バナー */}
+      <div style={{
+        textAlign: "center", padding: "10px 16px", borderRadius: 14,
+        background: "rgba(255,255,255,0.6)", border: "1px dashed #C4B9A5", marginBottom: 12,
+      }}>
+        <div style={{ fontSize: 11, color: "#A89F8E", marginBottom: 6 }}>
+          このリンクを友達にシェアして一緒に入力しよう
+        </div>
+        <button style={{
+          ...S.exportBtn, width: "100%", padding: "8px 0",
+          background: copied ? "#2D7A4F" : "#FDFBF7",
+          color: copied ? "#fff" : "#6B5F4F",
+          borderColor: copied ? "#2D7A4F" : "#C4B9A5",
+        }} onClick={handleCopyLink}>
+          {copied ? "✓ コピーしました！" : "🔗 招待リンクをコピー"}
         </button>
       </div>
 

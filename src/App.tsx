@@ -1,58 +1,79 @@
-import { useState, useMemo } from "react";
+import { useState, useEffect, useMemo } from "react";
 import type { Trip, Expense } from "./types";
 import { computeSettlement } from "./utils/settlement";
-import { saveTrip, loadTrip, saveTripList, loadTripList } from "./utils/storage";
+import {
+  saveTrip,
+  subscribeToTrip,
+  getLocalTripIds,
+  addLocalTripId,
+  removeLocalTripId,
+  deleteTripFromFirestore,
+} from "./utils/firestoreStorage";
 import { Home } from "./components/Home";
 import { CreateTrip } from "./components/CreateTrip";
 import { Dashboard } from "./components/Dashboard";
 import { ExpenseForm } from "./components/ExpenseForm";
 import { MemberDetail } from "./components/MemberDetail";
+import { S } from "./styles";
 
 type Screen = "home" | "create" | "dashboard" | "expense" | "member";
 
-function loadAllTrips(): { ids: string[]; tripsMap: Record<string, Trip> } {
-  const ids = loadTripList();
-  const tripsMap: Record<string, Trip> = {};
-  for (const id of ids) {
-    const t = loadTrip(id);
-    if (t) tripsMap[id] = t;
-  }
-  return { ids, tripsMap };
-}
-
 export default function App() {
-  const initial = useMemo(() => loadAllTrips(), []);
-  const [tripIds, setTripIds] = useState<string[]>(initial.ids);
-  const [tripsMap, setTripsMap] = useState<Record<string, Trip>>(initial.tripsMap);
+  const [tripIds, setTripIds] = useState<string[]>(getLocalTripIds());
+  const [tripsMap, setTripsMap] = useState<Record<string, Trip>>({});
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [screen, setScreen] = useState<Screen>("home");
   const [editExpense, setEditExpense] = useState<Expense | null>(null);
   const [focusMember, setFocusMember] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // URLパラメータ ?t=TRIPID を確認して自動でトリップを開く
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const tripId = params.get("t");
+    if (tripId) {
+      addLocalTripId(tripId);
+      setTripIds(getLocalTripIds());
+      setCurrentId(tripId);
+      setScreen("dashboard");
+      // URLをきれいにする
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+    setLoading(false);
+  }, []);
+
+  // 参加済みトリップを全てFirestoreからリアルタイム購読
+  useEffect(() => {
+    if (tripIds.length === 0) return;
+    const unsubscribers = tripIds.map((id) =>
+      subscribeToTrip(id, (trip) => {
+        if (trip) {
+          setTripsMap((prev) => ({ ...prev, [id]: trip }));
+        }
+      })
+    );
+    return () => unsubscribers.forEach((unsub) => unsub());
+  }, [tripIds]);
 
   const trip = currentId ? tripsMap[currentId] : null;
   const settlement = useMemo(() => (trip ? computeSettlement(trip) : null), [trip]);
 
-  const updateTrip = (updater: (t: Trip) => Trip) => {
-    if (!currentId) return;
-    setTripsMap((prev) => {
-      const updated = updater(prev[currentId]);
-      saveTrip(updated);
-      return { ...prev, [currentId]: updated };
-    });
-  };
-
-  const handleTripCreated = (newTrip: Trip) => {
-    saveTrip(newTrip);
-    const newIds = [...tripIds, newTrip.id];
-    saveTripList(newIds);
-    setTripIds(newIds);
-    setTripsMap((prev) => ({ ...prev, [newTrip.id]: newTrip }));
+  const handleTripCreated = async (newTrip: Trip) => {
+    await saveTrip(newTrip);
+    addLocalTripId(newTrip.id);
+    setTripIds(getLocalTripIds());
     setCurrentId(newTrip.id);
     setScreen("dashboard");
   };
 
-  const handleSaveExpense = (expense: Expense) => {
-    updateTrip((t) => ({
+  const handleUpdateTrip = async (updater: (t: Trip) => Trip) => {
+    if (!currentId || !trip) return;
+    const updated = updater(trip);
+    await saveTrip(updated);
+  };
+
+  const handleSaveExpense = async (expense: Expense) => {
+    await handleUpdateTrip((t) => ({
       ...t,
       expenses: editExpense
         ? t.expenses.map((e) => (e.id === editExpense.id ? expense : e))
@@ -62,9 +83,40 @@ export default function App() {
     setScreen("dashboard");
   };
 
-  const handleDeleteExpense = (id: string) => {
-    updateTrip((t) => ({ ...t, expenses: t.expenses.filter((e) => e.id !== id) }));
+  const handleDeleteExpense = async (id: string) => {
+    await handleUpdateTrip((t) => ({
+      ...t,
+      expenses: t.expenses.filter((e) => e.id !== id),
+    }));
   };
+
+  const handleDeleteTrip = async (id: string) => {
+    await deleteTripFromFirestore(id);
+    removeLocalTripId(id);
+    setTripIds(getLocalTripIds());
+    setTripsMap((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  };
+
+  const handleJoinTrip = (id: string) => {
+    addLocalTripId(id);
+    setTripIds(getLocalTripIds());
+    setCurrentId(id);
+    setScreen("dashboard");
+  };
+
+  if (loading) {
+    return (
+      <div style={S.container}>
+        <div style={S.loadingWrap}>
+          <p style={{ color: "#8B7E6A" }}>読み込み中...</p>
+        </div>
+      </div>
+    );
+  }
 
   if (screen === "home") {
     return (
@@ -73,7 +125,8 @@ export default function App() {
         tripIds={tripIds}
         onOpenTrip={(id) => { setCurrentId(id); setScreen("dashboard"); }}
         onCreate={() => setScreen("create")}
-        onTripsUpdate={(ids, map) => { setTripIds(ids); setTripsMap(map); }}
+        onDeleteTrip={handleDeleteTrip}
+        onJoinTrip={handleJoinTrip}
       />
     );
   }
@@ -88,8 +141,13 @@ export default function App() {
   }
 
   if (!trip || !settlement) {
-    setScreen("home");
-    return null;
+    return (
+      <div style={S.container}>
+        <div style={S.loadingWrap}>
+          <p style={{ color: "#8B7E6A" }}>トリップを読み込み中...</p>
+        </div>
+      </div>
+    );
   }
 
   if (screen === "expense") {
